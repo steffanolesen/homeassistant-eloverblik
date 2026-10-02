@@ -9,6 +9,11 @@
                 "title": "Enter refresh token and metering point"
             }
         },
+        "error": {
+            "cannot_connect": "Failed to connect to eloverblik.dk, please try again later",
+            "invalid_auth": "Invalid or expired refresh token",
+            "unknown": "Unexpected error"
+        },
         "title": "Eloverblik"
     }
 }

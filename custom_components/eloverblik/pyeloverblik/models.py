@@ -50,13 +50,15 @@ class TimeSeries:
         Get metering data for a single hour or month.
         index=1: data between 00.00 and 01.00 if TimeSeries contains day data, or January if TimeSeries contains month data.
         index=4: data between 03.00 and 04.00 if TimeSeries contains day data, or April if TimeSeries contains month data.
+        Returns None if the value is missing in the data from eloverblik.dk.
         '''
         return self._metering_data[index-1]
 
     def get_total_metering_data(self):
         total = 0
         for v in self._metering_data:
-            total += v
+            if v is not None:
+                total += v
 
         return total
 
@@ -85,7 +87,7 @@ class MeterReading:
     '''
     Class representing a meter reading.
     '''
-    def __init__(self, status: int, reading: str, reading_date: datetime.datetime, measurement_unit: str = None, detailed_status=None) -> None:
+    def __init__(self, status: int, reading: float, reading_date: str, measurement_unit: str = None, detailed_status=None) -> None:
         self._status = status
         self._reading = reading
         self._reading_date = reading_date

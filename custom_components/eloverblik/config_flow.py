@@ -1,6 +1,6 @@
 """Config flow for Eloverblik integration."""
 import logging
-from requests import HTTPError
+from requests import HTTPError, RequestException
 
 import voluptuous as vol
 
@@ -31,6 +31,8 @@ async def validate_input(hass: core.HomeAssistant, data):
         await hass.async_add_executor_job(service.get_tariffs, metering_point)
     except HTTPError as error:
         raise InvalidAuth() from error
+    except RequestException as error:
+        raise CannotConnect() from error
     
     return {"title": f"Eloverblik {metering_point}"}
 

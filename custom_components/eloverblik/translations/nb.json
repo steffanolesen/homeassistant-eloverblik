@@ -9,6 +9,11 @@
                 "title": "Angi oppdateringstoken og målepunkt"
             }
         },
+        "error": {
+            "cannot_connect": "Kunne ikke koble til eloverblik.dk, prøv igjen senere",
+            "invalid_auth": "Ugyldig eller utløpt oppdateringstoken",
+            "unknown": "Uventet feil"
+        },
         "title": "Eloverblik"
     }
 }

@@ -3,6 +3,7 @@ Primary public module for eloverblik.dk API wrapper.
 '''
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 import json
 from os import access
 import re
@@ -17,9 +18,11 @@ from requests.packages.urllib3.util.retry import Retry
 
 _LOGGER = logging.getLogger(__name__)
 
+# 400 is not retried: the API uses it for invalid parameters, which never succeed on retry.
+# For 429 and 503 the API asks clients to wait a minute before retrying.
 retry_strategy = Retry(
     total=3,
-    status_forcelist=[400, 429, 500, 502, 503, 504],
+    status_forcelist=[429, 500, 502, 503, 504],
     allowed_methods=["GET", "POST"],
     backoff_factor=60
 )
@@ -27,13 +30,20 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 http = requests.Session()
 http.mount("https://", adapter)
 
+# Quality code for points where the grid operator submitted a missing indicator and no quantity.
+QUALITY_NOT_AVAILABLE = 'A02'
+
+TARIFF_PERIOD_DAY = ('P1D', 'DAY')
+TARIFF_PERIOD_HOUR = ('PT1H', 'HOUR')
+
 
 class Eloverblik:
     '''
     Primary exported interface for eloverblik.dk API wrapper.
     '''
 
-    _access_token_cache = (None, None)
+    # Access tokens keyed by refresh token, so instances for different users don't share tokens.
+    _access_token_cache = {}
 
     def __init__(self, refresh_token):
         self._refresh_token = refresh_token
@@ -51,6 +61,10 @@ class Eloverblik:
             from_date = datetime.now()-timedelta(days=1)
         if to_date is None:
             to_date = datetime.now()
+
+        # The API rejects equal dates (error 30002), e.g. 1 January for the current year.
+        if to_date.date() <= from_date.date():
+            to_date = from_date + timedelta(days=1)
 
         access_token = self._get_access_token()
 
@@ -89,8 +103,8 @@ class Eloverblik:
         headers = self._create_headers(access_token)
         body = '{"meteringPoints": {"meteringPoint": ["' + metering_point + '"]}}'
         url = self._base_url + '/api/meteringpoints/meteringpoint/getcharges'
-       
-        response = requests.post(url,
+
+        response = http.post(url,
                                  data=body,
                                  headers=headers,
                                  timeout=5
@@ -106,57 +120,56 @@ class Eloverblik:
 
     def get_meter_reading_latest(self, metering_point):
         '''
-        Call meter readin API on eloverblik.dk and get latest meter reading. 
+        Get latest hourly consumption from the time series API on eloverblik.dk. Will look for 90 days.
         '''
-        access_token = self._get_access_token()
+        raw_data = self.get_time_series(metering_point,
+                                        from_date=datetime.now()-timedelta(days=90),
+                                        to_date=datetime.now(),
+                                        aggregation='Hour')
 
-        date_format = '%Y-%m-%d'
-        parsed_from_date = (datetime.now()-timedelta(days=90)).strftime(date_format)
-        parsed_to_date = datetime.now().strftime(date_format)
-
-        access_token = self._get_access_token()
-        headers = self._create_headers(access_token)
-
-        body = '{"meteringPoints": {"meteringPoint": ["' + metering_point + '"]}}'
-
-        url = self._base_url + f'/api/meterdata/getmeterreadings/{parsed_from_date}/{parsed_to_date}'
-
-        response = requests.post(url, data=body, headers=headers, timeout=10)
-
-        _LOGGER.debug(f"Response from API. Status: {response.status_code}, Body: {response.text}")
-
-        if response.status_code == 200:
-            return self._parse_meter_reading(json.loads(response.text))
+        if raw_data.status == 200:
+            return self._parse_latest_hour(json.loads(raw_data.body))
         else:
-            return MeterReading(response.status_code, None, None, response.text)
+            return MeterReading(raw_data.status, None, None, detailed_status=raw_data.body)
 
-    def _parse_meter_reading(self, reading) -> MeterReading:
-        ''' 
-        Parse meter reading result from API call
+    def _parse_latest_hour(self, result) -> MeterReading:
         '''
+        Parse time series result from API call and return the most recent hourly point.
+        '''
+        results, error = self._successful_results(result)
 
-        if 'result' in reading and len(reading['result']) > 0 and 'result' in reading['result'][0] and 'readings' in reading['result'][0]['result'] and len(reading['result'][0]['result']) > 0:
-            
-            readings = {}
+        if error is not None:
+            return MeterReading(404, None, None, detailed_status=error)
 
-            for r in reading['result'][0]['result']['readings']:
-                re = MeterReading(200, r['meterReading'], r['readingDate'], r['measurementUnit'])
+        latest_end = None
+        latest_quantity = None
+        unit = None
 
-                readings[r['readingDate']] = re
+        for time_series in self._time_series(results):
+            unit = time_series.get('measurement_Unit.name')
 
-            sortedList = sorted(readings)
+            for period in time_series.get('Period') or []:
+                period_start = self._parse_api_datetime(period['timeInterval']['start'])
 
-            if len(sortedList) > 0:
-                x = sortedList.pop()
-                return readings[x]
-            else: 
-                return MeterReading(404, None, None, detailed_status="No readings found in result.")
+                for point in period.get('Point') or []:
+                    quantity = self._point_quantity(point)
+                    if quantity is None:
+                        continue
 
-        else:
-            return MeterReading(404, None, None, detailed_status="Result does not contain any readings.");
+                    # Position 1 is the hour starting at period start, so its end is start + 1 hour.
+                    point_end = period_start + timedelta(hours=int(point['position']))
+
+                    if latest_end is None or point_end > latest_end:
+                        latest_end = point_end
+                        latest_quantity = quantity
+
+        if latest_end is None:
+            return MeterReading(404, None, None, detailed_status="Result does not contain any hourly data.")
+
+        return MeterReading(200, latest_quantity, latest_end.isoformat(), unit)
 
     def _get_access_token(self):
-        cache_datetime, short_token = Eloverblik._access_token_cache
+        cache_datetime, short_token = Eloverblik._access_token_cache.get(self._refresh_token, (None, None))
 
         if cache_datetime is not None and datetime.today() - cache_datetime < timedelta(hours = 12):
             _LOGGER.debug("Found valid token in cache.")
@@ -171,7 +184,7 @@ class Eloverblik:
         token_json = token_response.json()
         short_token = token_json['result']
 
-        Eloverblik._access_token_cache = (datetime.today(), short_token)
+        Eloverblik._access_token_cache[self._refresh_token] = (datetime.today(), short_token)
 
         _LOGGER.debug(f"Got short lived token: {short_token}")
         return short_token
@@ -236,11 +249,14 @@ class Eloverblik:
                                         from_date=datetime(year, 1, 1),
                                         to_date=datetime(year, 12, 31) if year < datetime.today().year else datetime.today(),
                                         aggregation='Month')
-        
+
         if raw_data.status == 200:
             json_response = json.loads(raw_data.body)
 
             r = self._parse_result(json_response)
+            if 'none' in r:
+                return r['none']
+
             keys = list(r.keys())
             keys.sort()
 
@@ -254,67 +270,139 @@ class Eloverblik:
     def _parse_result(self, result):
         '''
         Parse result from API call.
+        Returns TimeSeries keyed by period end, or a single 'none' key with a 404 TimeSeries if there is no data.
+        Points that are missing or have no quantity are None, so each value stays at its position.
         '''
+        results, error = self._successful_results(result)
+
+        if error is not None:
+            return {'none': TimeSeries(404, None, None, error)}
+
         parsed_result = {}
 
-        if 'result' in result and len(result['result']) > 0:
-            market_document = result['result'][0]['MyEnergyData_MarketDocument']
-            if 'TimeSeries' in market_document and len(market_document['TimeSeries']) > 0:
-                time_series = market_document['TimeSeries'][0]
+        for time_series in self._time_series(results):
+            for period in time_series.get('Period') or []:
+                start = self._parse_api_datetime(period['timeInterval']['start'])
+                end = self._parse_api_datetime(period['timeInterval']['end'])
+                points = period.get('Point') or []
 
-                if 'Period' in time_series and len(time_series['Period']) > 0:
-                    for period in time_series['Period']:
-                        metering_data = []
+                length = max([int(p['position']) for p in points], default=0)
+                if period.get('resolution') == 'PT1H':
+                    # Also covers trailing missing hours, and 23/25 hour days.
+                    length = max(length, int((end - start).total_seconds() // 3600))
 
-                        point = period['Point']
-                        for i in point:
-                            metering_data.append(
-                                float(i['out_Quantity.quantity']))
+                metering_data = [None] * length
+                for point in points:
+                    metering_data[int(point['position']) - 1] = self._point_quantity(point)
 
-                        date = datetime.strptime(
-                            period['timeInterval']['end'], '%Y-%m-%dT%H:%M:%S%z')
+                parsed_result[end] = TimeSeries(200, end, metering_data)
 
-                        time_series = TimeSeries(200, date, metering_data)
-
-                        parsed_result[date] = time_series
-                else:
-                    parsed_result['none'] = TimeSeries(404,
-                                                       None,
-                                                       None,
-                                                       f"Data most likely not available yet-1: {result}")
-            else:
-                parsed_result['none'] = TimeSeries(404,
-                                                   None,
-                                                   None,
-                                                   f"Data most likely not available yet-2: {result}")
-        else:
+        if len(parsed_result) == 0:
             parsed_result['none'] = TimeSeries(404,
                                                None,
                                                None,
-                                               f"Data most likely not available yet-3: {result}")
+                                               f"Data most likely not available yet: {result}")
 
         return parsed_result
 
+    def _successful_results(self, result):
+        '''
+        Return the successful per metering point results and an error text if there are none.
+        A HTTP 200 response can still contain results with success=false and an errorCode.
+        '''
+        results = result.get('result') or []
+
+        if len(results) == 0:
+            return [], "Result does not contain any data."
+
+        successful = [r for r in results if r.get('success', True)]
+
+        if len(successful) == 0:
+            errors = ', '.join(f"Error {r.get('errorCode')}: {r.get('errorText')}" for r in results)
+            return [], errors
+
+        return successful, None
+
+    def _time_series(self, results):
+        '''
+        All TimeSeries in the given results. The same metering point can be returned once per access period.
+        '''
+        for r in results:
+            market_document = r.get('MyEnergyData_MarketDocument') or {}
+            yield from market_document.get('TimeSeries') or []
+
+    def _point_quantity(self, point):
+        '''
+        Quantity of a time series point, or None if the grid operator reported it as not available.
+        '''
+        quantity = point.get('out_Quantity.quantity')
+
+        if quantity is None or point.get('out_Quantity.quality') == QUALITY_NOT_AVAILABLE:
+            return None
+
+        return float(quantity)
+
+    def _parse_api_datetime(self, value):
+        '''
+        Parse a timestamp from the API. Timestamps without a timezone are assumed to be UTC.
+        '''
+        parsed = datetime.fromisoformat(value)
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed
+
+    def _tariff_is_valid_now(self, tariff, now):
+        '''
+        The charges API also returns charges that start in the future. Those should not be part of todays price.
+        '''
+        try:
+            valid_from = self._parse_api_datetime(tariff['validFromDate']) if tariff.get('validFromDate') else None
+            valid_to = self._parse_api_datetime(tariff['validToDate']) if tariff.get('validToDate') else None
+        except ValueError:
+            _LOGGER.warning(f"Unable to parse validity dates for tariff '{tariff.get('name')}'. Including it.")
+            return True
+
+        if valid_from is not None and valid_from > now:
+            return False
+
+        if valid_to is not None and valid_to <= now:
+            return False
+
+        return True
+
     def _parse_tariffs_from_charges_result(self, result):
-        ''' 
+        '''
         Parse charges result from API call
         '''
+        results, error = self._successful_results(result)
 
-        if 'result' in result and len(result['result']) > 0 and 'result' in result['result'][0] and 'tariffs' in result['result'][0]['result']:
-            charges = {}
+        if error is None and not (results[0].get('result') or {}).get('tariffs'):
+            error = "Result does not contain any tariffs."
 
-            for tariff in result['result'][0]['result']['tariffs']:
-                name = tariff['name'].lower().replace(' ', '_')
+        if error is not None:
+            return Charges(404, None, error)
 
-                if tariff['periodType'] == 'P1D':
-                    charges[name] = tariff['prices'][0]['price']
-                elif tariff['periodType'] == 'PT1H':
-                    sorted_prices = [p['price'] for p in sorted(tariff['prices'], key=lambda d: int(d['position']))]
-                    charges[name] = sorted_prices
-                else:
-                    raise NotImplementedError(f"Unsupported periodType for tariff '{tariff['periodType']}")
+        charges = {}
+        now = datetime.now(timezone.utc)
 
-            return Charges(200, charges)
+        for tariff in results[0]['result']['tariffs']:
+            if not self._tariff_is_valid_now(tariff, now):
+                _LOGGER.debug(f"Skipping tariff '{tariff['name']}' that is not valid now ({tariff.get('validFromDate')} - {tariff.get('validToDate')}).")
+                continue
 
-        else:
-            return Charges(400, None);
+            name = tariff['name'].lower().replace(' ', '_')
+            if name in charges:
+                # Different tariffs can have the same name. Keep both, so both are part of the sum.
+                name = f"{name}_{tariff.get('priceId') or len(charges)}"
+
+            if tariff['periodType'] in TARIFF_PERIOD_DAY:
+                charges[name] = tariff['prices'][0]['price']
+            elif tariff['periodType'] in TARIFF_PERIOD_HOUR:
+                sorted_prices = [p['price'] for p in sorted(tariff['prices'], key=lambda d: int(d['position']))]
+                charges[name] = sorted_prices
+            else:
+                _LOGGER.warning(f"Unsupported periodType '{tariff['periodType']}' for tariff '{tariff['name']}'. It is not included in the tariff sum.")
+
+        return Charges(200, charges)

@@ -224,9 +224,10 @@ class EloverblikStatistic(SensorEntity):
         self._attr_unique_id = f"{hass_eloverblik.get_metering_point()}-statistic"
         self._hass_eloverblik = hass_eloverblik
 
-    async def async_will_remove_from_hass(self) -> None:
-        """Cleanup callback to remove statistics when deleting entity"""
-        await get_instance(self.hass).async_clear_statistics([self.entity_id])
+    async def async_removed_from_registry(self) -> None:
+        """Remove imported statistics when the entity is deleted.
+        Not called on unload/reload, so statistics survive restarts."""
+        get_instance(self.hass).async_clear_statistics([self.entity_id])
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     async def async_update(self):
@@ -283,7 +284,12 @@ class EloverblikStatistic(SensorEntity):
                 for hour in range(0, number_of_hours):
                     start = date + timedelta(hours=hour)
 
-                    total += time_series.get_metering_data(hour+1)
+                    value = time_series.get_metering_data(hour+1)
+                    if value is None:
+                        # Missing in eloverblik. Skip the hour, so the sum is not affected.
+                        continue
+
+                    total += value
 
                     statistics.append(
                         StatisticData(

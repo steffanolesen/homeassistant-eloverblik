@@ -1,21 +1,19 @@
 {
-  "config": {
-    "title": "Eloverblik",
-    "step": {
-      "user": {
-        "title": "Connect to the device",
-        "data": {
-          "host": "Host"
-        }
-      }
-    },
-    "error": {
-      "cannot_connect": "Failed to connect, please try again",
-      "invalid_auth": "Invalid authentication",
-      "unknown": "Unexpected error"
-    },
-    "abort": {
-      "already_configured": "Device is already configured"
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "refresh_token": "Refresh Token",
+                    "metering_point": "Metering Point"
+                },
+                "title": "Enter refresh token and metering point"
+            }
+        },
+        "error": {
+            "cannot_connect": "Failed to connect to eloverblik.dk, please try again later",
+            "invalid_auth": "Invalid or expired refresh token",
+            "unknown": "Unexpected error"
+        },
+        "title": "Eloverblik"
     }
-  }
 }

@@ -9,6 +9,8 @@ import voluptuous as vol
 from homeassistant.util import Throttle
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.components.recorder import get_instance
+from homeassistant.helpers import entity_registry as er
 from .pyeloverblik.models import TimeSeries
 from .pyeloverblik.eloverblik import Eloverblik
 
@@ -56,6 +58,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     return unload_ok
 
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
+    """Remove imported statistics when the config entry is deleted.
+    The entity is already unloaded here, so its own removal hook is not called."""
+    entity_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.data['metering_point']}-statistic")
+
+    if entity_id is not None:
+        get_instance(hass).async_clear_statistics([entity_id])
+
 class HassEloverblik:
     def __init__(self, refresh_token, metering_point):
         self._client = Eloverblik(refresh_token)
@@ -81,7 +93,8 @@ class HassEloverblik:
     def get_usage_hour(self, hour):
         if self._day_data != None:
             try:
-                return round(self._day_data.get_metering_data(hour), 3)
+                value = self._day_data.get_metering_data(hour)
+                return round(value, 3) if value is not None else None
             except IndexError:
                 self._day_data.get_metering_data(23)
                 _LOGGER.info(f"Unable to get data for hour {hour}. If siwtch to daylight saving day this is not an error.")
@@ -98,6 +111,9 @@ class HassEloverblik:
             if raw_data.status == 200:
                 json_response = json.loads(raw_data.body)
                 parsed = self._client._parse_result(json_response)
+                if 'none' in parsed:
+                    _LOGGER.info(f"No historic data from eloverblik: {parsed['none'].detailed_status}")
+                    return None
                 return parsed
             else:
                 _LOGGER.warn(f"Error from eloverblik while getting historic data: {raw_data.status} - {raw_data.body}")
