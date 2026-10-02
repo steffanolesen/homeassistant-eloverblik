@@ -9,8 +9,8 @@ import voluptuous as vol
 from homeassistant.util import Throttle
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from pyeloverblik.models import TimeSeries
-from pyeloverblik.eloverblik import Eloverblik
+from .pyeloverblik.models import TimeSeries
+from .pyeloverblik.eloverblik import Eloverblik
 
 from .const import DOMAIN
 

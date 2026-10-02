@@ -64,7 +64,7 @@ It is possible to debug log the raw response from eloverblik.dk API. This is don
 logger: 
   default: info
   logs: 
-    pyeloverblik.eloverblik: debug
+    custom_components.eloverblik.pyeloverblik: debug
 ```
 
 ## Examples

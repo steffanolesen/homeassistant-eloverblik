@@ -5,7 +5,7 @@ from requests import HTTPError
 import voluptuous as vol
 
 from homeassistant import config_entries, core, exceptions
-from pyeloverblik.eloverblik import Eloverblik
+from .pyeloverblik.eloverblik import Eloverblik
 
 from .const import DOMAIN  # pylint:disable=unused-import
 

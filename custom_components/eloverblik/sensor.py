@@ -24,7 +24,7 @@ from homeassistant.components.sensor import (
 from homeassistant.util import Throttle
 from homeassistant.util.unit_conversion import EnergyConverter
 from homeassistant.helpers.entity import Entity
-from pyeloverblik.models import TimeSeries
+from .pyeloverblik.models import TimeSeries
 from .__init__ import HassEloverblik, MIN_TIME_BETWEEN_UPDATES
 from .const import DOMAIN, CURRENCY_KRONER_PER_KILO_WATT_HOUR
 
